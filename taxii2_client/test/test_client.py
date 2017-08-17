@@ -227,3 +227,10 @@ def test_get_collection_objects(collection):
 
     assert response['spec_version'] == '2.0'
     assert response['objects'][0]['id'] == 'indicator--252c7c11-daf2-42bd-843b-be65edca9f61'
+
+
+@responses.activate
+def test_cannot_use_closed_connection(collection):
+    set_collection_response()
+    collection.close()
+    collection.refresh()
