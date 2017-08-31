@@ -8,21 +8,18 @@ MEDIA_TYPE_TAXII_V20 = "application/vnd.oasis.taxii+json; version=2.0"
 
 class TAXIIServiceException(Exception):
     """Base class for exceptions raised by this library."""
-    def __init__(self, *args):
-        super(TAXIIServiceException, self).__init__(args)
+    pass
 
 
 class InvalidArgumentsError(TAXIIServiceException):
     """Invalid arguments were passed to a method."""
-    def __init__(self, msg):
-        super(InvalidArgumentsError, self).__init__(msg)
+    pass
 
 
 class AccessError(TAXIIServiceException):
     """Attempt was made to read/write to a collection when the collection
     doesn't allow that operation."""
-    def __init__(self, msg):
-        super(AccessError, self).__init__(msg)
+    pass
 
 
 class _TAXIIEndpoint(object):
@@ -53,20 +50,41 @@ class _TAXIIEndpoint(object):
         return False
 
 
-# TODO: Should this object allow refreshing itself (have its own URL?)
-class Status(object):
-    def __init__(self, id, status, total_count, success_count, failure_count, pending_count, request_timestamp=None,
-                 successes=None, failures=None, pendings=None):
-        self.id_ = id
+class Status(_TAXIIEndpoint):
+    """TAXII Status Resource"""
+    # We don't need to jump through the same lazy-load as with Collection, since
+    # it's *far* less likely people will create these manually rather than
+    # just getting them returned from Collection.add_objects(), and there aren't
+    # other endpoints to call on the Status object.
+
+    def __init__(self, url, user=None, password=None, conn=None, **kwargs):
+        super(Status, self).__init__(url, user, password, conn)
+        if kwargs:
+            self._populate_fields(**kwargs)
+        else:
+            self.refresh()
+
+    def __nonzero__(self):
+        return self.status == u"complete"
+    __bool__ = __nonzero__
+
+    def refresh(self):
+        response = self._conn.get(self.url, accept=MEDIA_TYPE_TAXII_V20)
+        self._populate_fields(**response)
+
+    def _populate_fields(self, id, status, total_count, success_count,
+                         failure_count, pending_count, request_timestamp=None,
+                         successes=None, failures=None, pendings=None):
+        self.id = id
         self.status = status
         self.total_count = total_count
         self.success_count = success_count
         self.failure_count = failure_count
         self.pending_count = pending_count
-
-    def __nonzero__(self):
-        return self.status == u"complete"
-    __bool__ = __nonzero__
+        # TODO: validate that len(successes) == success_count, etc.
+        self.successes = successes or []
+        self.failures = failures or []
+        self.pendings = pendings or []
 
 
 class Collection(_TAXIIEndpoint):
@@ -145,6 +163,10 @@ class Collection(_TAXIIEndpoint):
         self._ensure_loaded()
         return self._media_types
 
+    @property
+    def objects_url(self):
+        return self.url + 'objects/'
+
     def _populate_fields(self, id=None, title=None, description=None,
                          can_read=None, can_write=None, media_types=None):
         if media_types is None:
@@ -161,6 +183,14 @@ class Collection(_TAXIIEndpoint):
         if not self._loaded:
             self.refresh()
 
+    def _verify_can_read(self):
+        if not self.can_read:
+            raise AccessError(u"Collection '%s' does not allow reading." % self.url)
+
+    def _verify_can_write(self):
+        if not self.can_write:
+            raise AccessError(u"Collection '%s' does not allow writing." % self.url)
+
     def refresh(self):
         response = self._conn.get(self.url, accept=MEDIA_TYPE_TAXII_V20)
         self._populate_fields(**response)
@@ -170,23 +200,19 @@ class Collection(_TAXIIEndpoint):
     def get_objects(self, filters=None):
         """Implement the ``Get Objects`` endpoint (section 5.3)"""
         # TODO: add filters
-        if not self.can_read:
-            raise AccessError("Collection {} does not allow reading".format(
-                self.url))
-        url = self.url + "objects/"
-        return self._conn.get(url, accept=MEDIA_TYPE_STIX_V20)
+        self._verify_can_read()
+        return self._conn.get(self.objects_url, accept=MEDIA_TYPE_STIX_V20)
 
-    # TODO: update this function
     def get_object(self, obj_id):
-        if not self.can_read:
-            raise AccessError("Collection %s of %s does not allow reading" %
-                             (self.id_, self.api_root.uri))
-        return self._conn.get("/".join([self.api_root.url, "collections", self.id_, "objects", obj_id]),
-                              MEDIA_TYPE_STIX_V20)
+        """Implement the ``Get an Object`` endpoint (section 5.5)"""
+        self._verify_can_read()
+        url = self.objects_url + str(obj_id) + '/'
+        return self._conn.get(url, accept=MEDIA_TYPE_STIX_V20)
 
     def add_objects(self, bundle, wait_for_completion=True, poll_interval=1,
                     timeout=60):
-        """
+        """Implement the ``Add Objects`` endpoint (sectdion 5.4)
+
         Add objects to the collection.  This may be performed either
         synchronously or asynchronously.  To add asynchronously, set
         wait_for_completion to False.  If False, the latter two args are
@@ -213,37 +239,38 @@ class Collection(_TAXIIEndpoint):
             a Status object corresponding to the most recent data obtained
             before the timeout, is returned.
         """
-        if not self.can_write:
-            raise AccessError(u"Collection %s of %s does not allow writing" %
-                             (self.id_, self.api_root.uri))
-
-        add_url = urlparse.urljoin(self.url, "objects/")
-
-        status_json = self._conn.post(add_url,
-            headers={u"Accept": MEDIA_TYPE_TAXII_V20,
-                     u"Content-Type": MEDIA_TYPE_STIX_V20},
-            json=bundle)
-
-        if not wait_for_completion or status_json[u"status"] == u"complete":
-            return Status(**status_json)
+        self._verify_can_write()
+        headers = {
+            u"Accept": MEDIA_TYPE_TAXII_V20,
+            u"Content-Type": MEDIA_TYPE_STIX_V20,
+        }
+        status_json = self._conn.post(self.objects_url, headers=headers, json=bundle)
 
         status_url = urlparse.urljoin(self.url, u"../../status/{}".format(
             status_json[u"id"]))
 
+        status = Status(url=status_url, conn=self._conn, **status_json)
+
+        if not wait_for_completion or status.status == u"complete":
+            return status
+
+        # TODO: consider moving this to a "Status.wait_until_final()" function.
         start_time = time.time()
         elapsed = 0
-        while status_json[u"status"] != u"complete" and \
+        while status.status != u"complete" and \
                 (timeout <= 0 or elapsed < timeout):
             time.sleep(poll_interval)
-            status_json = self._conn.get(status_url, MEDIA_TYPE_TAXII_V20)
+            status.refresh()
             elapsed = time.time() - start_time
 
-        return Status(**status_json)
+        return status
 
-    # TODO: update this function
     def get_manifest(self, filters=None):
-        return self._conn.get("/".join([self.api_root.url, "collections", self.id_, "manifest"]),
-                              MEDIA_TYPE_TAXII_V20)
+        """Implement the ``Get Object Manifests`` endpoint (section 5.6)."""
+        # TODO: add filters
+        self._verify_can_read()
+        return self._conn.get(self.url + 'manifest/',
+                              accept=MEDIA_TYPE_TAXII_V20)
 
 
 class ApiRoot(_TAXIIEndpoint):
@@ -327,7 +354,6 @@ class ApiRoot(_TAXIIEndpoint):
         response = self._conn.get(url, accept=MEDIA_TYPE_TAXII_V20)
 
         self._collections = []
-        print(response)
         for item in response['collections']:
             collection_url = url + item['id'] + "/"
             collection = Collection(collection_url, conn=self._conn, **item)
@@ -335,11 +361,10 @@ class ApiRoot(_TAXIIEndpoint):
 
         self._loaded_collections = True
 
-    # TODO: update this function
-    def get_status(self, id_):
-        info = self._conn.get("/".join([self.url, "status", id_]),
-                              {"Accept": MEDIA_TYPE_TAXII_V20})
-        return Status(**info)
+    def get_status(self, status_id):
+        status_url = self.url + "status/" + status_id + "/"
+        info = self._conn.get(status_url, accept=MEDIA_TYPE_TAXII_V20)
+        return Status(status_url, conn=self._conn, **info)
 
 
 class Server(_TAXIIEndpoint):
@@ -474,10 +499,10 @@ class _HTTPConnection(object):
         self.session.close()
 
 
-def get_collection_by_id(api_root, id_):
-    for c in api_root.collections:
-        if c.id == id_:
-            return c
+def get_collection_by_id(api_root, coll_id):
+    for collection in api_root.collections:
+        if collection.id == coll_id:
+            return collection
 
     return None
 
