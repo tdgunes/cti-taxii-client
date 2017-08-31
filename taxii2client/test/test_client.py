@@ -401,3 +401,9 @@ def test_cannot_use_closed_connection(collection):
     set_collection_response()
     collection.close()
     collection.refresh()
+
+
+def test_cannot_use_closed_connection_no_fixture():
+    coll = Collection(COLLECTION_URL)
+    coll.close()
+    coll.refresh()
