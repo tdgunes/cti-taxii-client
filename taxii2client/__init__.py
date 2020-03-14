@@ -496,12 +496,16 @@ class Collection(_TAXIIEndpoint):
         self._populate_fields(**response)
         self._loaded = True
 
-    def get_objects(self, accept=MEDIA_TYPE_STIX_V20, **filter_kwargs):
-        """Implement the ``Get Objects`` endpoint (section 5.3)"""
+    def get_objects(self, accept=MEDIA_TYPE_STIX_V20, range_query=None, **filter_kwargs):
+        """Implement the ``Get Objects`` endpoint (section 5.3)
+           range_query: str, e.g. to get objects between 1-4, range_query must be set to "1-4"
+        """
         self._verify_can_read()
         query_params = _filter_kwargs_to_query_params(filter_kwargs)
-        return self._conn.get(self.objects_url, headers={"Accept": accept},
-                              params=query_params)
+        headers = {"Accept": accept}
+        if range_query:
+            headers["Range"] = "items {}".format(range_query)
+        return self._conn.get(self.objects_url, headers=headers,params=query_params)
 
     def get_object(self, obj_id, version=None, accept=MEDIA_TYPE_STIX_V20):
         """Implement the ``Get an Object`` endpoint (section 5.5)"""
